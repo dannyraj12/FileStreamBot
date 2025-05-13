@@ -28,12 +28,12 @@ async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message
         logging.debug("Storing file_id of all clients in DB")
         log_msg = await send_file(FileStream, db_id, file_info['file_id'], message)
         if not log_msg:
-            logging.warning("send_file returned None — skipping update_file_ids")
+            logging.warning("send_file returned None, likely FLOG_CHANNEL loop")
             return None
         await db.update_file_ids(db_id, await update_file_id(log_msg.id, multi_clients))
         logging.debug("Stored file_id of all clients in DB")
         if not client:
-            return
+            return None
         file_info = await db.get_file(db_id)
 
     file_id_info = file_info.setdefault("file_ids", {})
@@ -41,7 +41,7 @@ async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message
         logging.debug("Storing file_id in DB")
         log_msg = await send_file(FileStream, db_id, file_info['file_id'], message)
         if not log_msg:
-            logging.warning("send_file returned None while storing file_id")
+            logging.warning("send_file returned None while storing individual client file_id")
             return None
         msg = await client.get_messages(Telegram.FLOG_CHANNEL, log_msg.id)
         media = get_media_from_message(msg)
@@ -134,7 +134,7 @@ async def update_file_id(msg_id, multi_clients):
 async def send_file(client: Client, db_id, file_id: str, message):
     # 🚫 Prevent sending file back to logs if already from logs
     if message.chat.id == Telegram.FLOG_CHANNEL:
-        logging.warning("Skipping send_file because message is already from FLOG_CHANNEL")
+        logging.warning("send_file skipped: message is from FLOG_CHANNEL")
         return None
 
     file_caption = getattr(message, 'caption', None) or get_name(message)
@@ -145,7 +145,7 @@ async def send_file(client: Client, db_id, file_id: str, message):
             caption=f'**{file_caption}**'
         )
     except Exception as e:
-        logging.error(f"Failed to send_cached_media: {e}")
+        logging.error(f"send_cached_media failed: {e}")
         return None
 
     try:
@@ -154,20 +154,14 @@ async def send_file(client: Client, db_id, file_id: str, message):
                 text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
                      f"**Uꜱᴇʀ ɪᴅ :** `{message.from_user.id}`\n"
                      f"**Fɪʟᴇ ɪᴅ :** `{db_id}`",
-                disable_web_page_preview=True,
-                parse_mode=ParseMode.MARKDOWN,
-                quote=True
-            )
+                disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN, quote=True)
         else:
             await log_msg.reply_text(
                 text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** {message.chat.title} \n"
                      f"**Cʜᴀɴɴᴇʟ ɪᴅ :** `{message.chat.id}`\n"
                      f"**Fɪʟᴇ ɪᴅ :** `{db_id}`",
-                disable_web_page_preview=True,
-                parse_mode=ParseMode.MARKDOWN,
-                quote=True
-            )
+                disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN, quote=True)
     except Exception as e:
-        logging.error(f"Failed to send reply_text: {e}")
+        logging.error(f"reply_text failed: {e}")
 
     return log_msg
