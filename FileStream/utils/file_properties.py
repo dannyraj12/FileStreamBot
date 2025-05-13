@@ -16,10 +16,20 @@ db = Database(Telegram.DATABASE_URL, Telegram.SESSION_NAME)
 
 async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message) -> Optional[FileId]:
     logging.debug("Starting of get_file_ids")
+
+    # 🚫 Prevent infinite loop if file comes from FLOG_CHANNEL
+    if message.chat.id == Telegram.FLOG_CHANNEL:
+        logging.warning("Ignored message from FLOG_CHANNEL to avoid recursion")
+        return None
+
     file_info = await db.get_file(db_id)
+
     if (not "file_ids" in file_info) or not client:
         logging.debug("Storing file_id of all clients in DB")
         log_msg = await send_file(FileStream, db_id, file_info['file_id'], message)
+        if not log_msg:
+            logging.warning("send_file returned None — skipping update_file_ids")
+            return None
         await db.update_file_ids(db_id, await update_file_id(log_msg.id, multi_clients))
         logging.debug("Stored file_id of all clients in DB")
         if not client:
@@ -30,6 +40,9 @@ async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message
     if not str(client.id) in file_id_info:
         logging.debug("Storing file_id in DB")
         log_msg = await send_file(FileStream, db_id, file_info['file_id'], message)
+        if not log_msg:
+            logging.warning("send_file returned None while storing file_id")
+            return None
         msg = await client.get_messages(Telegram.FLOG_CHANNEL, log_msg.id)
         media = get_media_from_message(msg)
         file_id_info[str(client.id)] = getattr(media, "file_id", "")
@@ -48,14 +61,8 @@ async def get_file_ids(client: Client | bool, db_id: str, multi_clients, message
 
 def get_media_from_message(message: "Message") -> Any:
     media_types = (
-        "audio",
-        "document",
-        "photo",
-        "sticker",
-        "animation",
-        "video",
-        "voice",
-        "video_note",
+        "audio", "document", "photo", "sticker", "animation",
+        "video", "voice", "video_note",
     )
     for attr in media_types:
         media = getattr(message, attr, None)
@@ -72,14 +79,15 @@ def get_name(media_msg: Message | FileId) -> str:
     if isinstance(media_msg, Message):
         media = get_media_from_message(media_msg)
         file_name = getattr(media, "file_name", "")
-
     elif isinstance(media_msg, FileId):
         file_name = getattr(media_msg, "file_name", "")
+    else:
+        file_name = ""
 
     if not file_name:
         if isinstance(media_msg, Message) and media_msg.media:
             media_type = media_msg.media.value
-        elif media_msg.file_type:
+        elif hasattr(media_msg, "file_type"):
             media_type = media_msg.file_type.name.lower()
         else:
             media_type = "file"
@@ -90,9 +98,8 @@ def get_name(media_msg: Message | FileId) -> str:
             "sticker": "webp"
         }
 
-        ext = formats.get(media_type)
-        ext = "." + ext if ext else ""
-
+        ext = formats.get(media_type, "")
+        ext = f".{ext}" if ext else ""
         date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         file_name = f"{media_type}-{date}{ext}"
 
@@ -121,24 +128,46 @@ async def update_file_id(msg_id, multi_clients):
         log_msg = await client.get_messages(Telegram.FLOG_CHANNEL, msg_id)
         media = get_media_from_message(log_msg)
         file_ids[str(client.id)] = getattr(media, "file_id", "")
-
     return file_ids
 
 
 async def send_file(client: Client, db_id, file_id: str, message):
-    file_caption = getattr(message, 'caption', None) or get_name(message)
-    log_msg = await client.send_cached_media(chat_id=Telegram.FLOG_CHANNEL, file_id=file_id,
-                                             caption=f'**{file_caption}**')
+    # 🚫 Prevent sending file back to logs if already from logs
+    if message.chat.id == Telegram.FLOG_CHANNEL:
+        logging.warning("Skipping send_file because message is already from FLOG_CHANNEL")
+        return None
 
-    if message.chat.type == ChatType.PRIVATE:
-        await log_msg.reply_text(
-            text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n**Uꜱᴇʀ ɪᴅ :** `{message.from_user.id}`\n**Fɪʟᴇ ɪᴅ :** `{db_id}`",
-            disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN, quote=True)
-    else:
-        await log_msg.reply_text(
-            text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** {message.chat.title} \n**Cʜᴀɴɴᴇʟ ɪᴅ :** `{message.chat.id}`\n**Fɪʟᴇ ɪᴅ :** `{db_id}`",
-            disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN, quote=True)
+    file_caption = getattr(message, 'caption', None) or get_name(message)
+    try:
+        log_msg = await client.send_cached_media(
+            chat_id=Telegram.FLOG_CHANNEL,
+            file_id=file_id,
+            caption=f'**{file_caption}**'
+        )
+    except Exception as e:
+        logging.error(f"Failed to send_cached_media: {e}")
+        return None
+
+    try:
+        if message.chat.type == ChatType.PRIVATE:
+            await log_msg.reply_text(
+                text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
+                     f"**Uꜱᴇʀ ɪᴅ :** `{message.from_user.id}`\n"
+                     f"**Fɪʟᴇ ɪᴅ :** `{db_id}`",
+                disable_web_page_preview=True,
+                parse_mode=ParseMode.MARKDOWN,
+                quote=True
+            )
+        else:
+            await log_msg.reply_text(
+                text=f"**RᴇQᴜᴇꜱᴛᴇᴅ ʙʏ :** {message.chat.title} \n"
+                     f"**Cʜᴀɴɴᴇʟ ɪᴅ :** `{message.chat.id}`\n"
+                     f"**Fɪʟᴇ ɪᴅ :** `{db_id}`",
+                disable_web_page_preview=True,
+                parse_mode=ParseMode.MARKDOWN,
+                quote=True
+            )
+    except Exception as e:
+        logging.error(f"Failed to send reply_text: {e}")
 
     return log_msg
-    # return await client.send_cached_media(Telegram.BIN_CHANNEL, file_id)
-
